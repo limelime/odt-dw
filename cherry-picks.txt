@@ -8,8 +8,8 @@ Trouble:
 	  https://github.com/LarsGit223/dokuwiki-plugin-odt/commit/bd7531b30caf353115d10cef3fcfdb20c96dbc75
 	Issue: Will give blank page.
   
-Cherry picked:
-===============
+Cherry picked v1.1:
+==================
 	Fixes #81: Bookmark is created but it is not hyperlinked
 	  https://github.com/LarsGit223/dokuwiki-plugin-odt/commit/b802ed28380cf9689c87c8c6e6415e317cd0fc35
   
