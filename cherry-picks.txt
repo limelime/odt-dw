@@ -7,6 +7,9 @@ Trouble:
 	Fixes #80, #85: Table in nested list using Wrap plugin...
 	  https://github.com/LarsGit223/dokuwiki-plugin-odt/commit/bd7531b30caf353115d10cef3fcfdb20c96dbc75
 	Issue: Will give blank page.
+
+Cherry picked v1.2:
+==================
   
 Cherry picked v1.1:
 ==================
