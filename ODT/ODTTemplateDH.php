@@ -25,6 +25,7 @@ class ODTTemplateDH extends docHandler
     protected $config = null;
     var $template = null;
     var $directory = null;
+    protected $styleset = NULL;
 
     /**
      * Constructor.
@@ -35,6 +36,10 @@ class ODTTemplateDH extends docHandler
         // Load config
         $this->config = plugin_load('helper', 'odt_config');
         $this->config->load($warning);
+
+        // Create styles.
+        $this->styleset = new ODTDefaultStyles();
+        $this->styleset->import();
     }
 
     /**
@@ -67,7 +72,7 @@ class ODTTemplateDH extends docHandler
      * @param ODTDefaultStyles $styleset
      * @return mixed
      */
-    public function build($doc=null, $autostyles=null, $commonstyles=null, $meta=null, $userfields=null, $styleset=null, $pagestyles=null){
+    public function build($doc=null, $meta=null, $userfields=null, $pagestyles=null){
         // for the temp dir
         global $ID;
 
@@ -90,9 +95,37 @@ class ODTTemplateDH extends docHandler
             throw new Exception(' Error extracting the zip archive:'.$template_path.' to '.$temp_dir);
         }
 
+        // Import styles from ODT template        
+        $this->styleset->importFromODTFile($temp_dir.'/content.xml', 'office:automatic-styles', true);
+        $this->styleset->importFromODTFile($temp_dir.'/styles.xml', 'office:automatic-styles', true);
+        $this->styleset->importFromODTFile($temp_dir.'/styles.xml', 'office:styles', true);
+        $test = $this->styleset->importFromODTFile($temp_dir.'/styles.xml', 'office:master-styles', true);
+
+        // Evtl. copy page format of first page to different style
+        $first_master = $this->styleset->getStyleAtIndex ('office:master-styles', 0);
+        if ($first_master != NULL &&
+            $first_master->getProperty('style-page-layout-name') != $this->getStyleName('first page')) {
+            // The master page of the template references a different page layout style
+            // then used by us for the first page. Copy the page format settings.
+            $source = $this->getStyle($this->getStyleName('first page'));
+            $dest = $this->getStyle($first_master->getProperty('style-page-layout-name'));
+            
+            if ($source != NULL && $dest != NULL) {
+                $dest->setProperty('width', $source->getProperty('width'));
+                $dest->setProperty('height', $source->getProperty('height'));
+                $dest->setProperty('margin-top', $source->getProperty('margin-top'));
+                $dest->setProperty('margin-right', $source->getProperty('margin-right'));
+                $dest->setProperty('margin-bottom', $source->getProperty('margin-bottom'));
+                $dest->setProperty('margin-left', $source->getProperty('margin-left'));
+            }
+        }
+
+        $autostyles = $this->styleset->export('office:automatic-styles');
+        $commonstyles = $this->styleset->export('office:styles');
+        $masterstyles = $this->styleset->export('office:master-styles');
+
         // Prepare content
-        $missingstyles = $styleset->getMissingStyles($temp_dir.'/styles.xml');
-        $missingfonts = $styleset->getMissingFonts($temp_dir.'/styles.xml');
+        $missingfonts = $this->styleset->getMissingFonts($temp_dir.'/styles.xml');
 
         // Insert content
         $old_content = io_readFile($temp_dir.'/content.xml');
@@ -116,11 +149,20 @@ class ODTTemplateDH extends docHandler
         } else {
             $this->_odtReplaceInFile('</text:user-field-decls>', substr($userfields,23), $temp_dir.'/content.xml');
         }
-
+        
         // Insert styles & fonts
-        $this->_odtReplaceInFile('</office:automatic-styles>', substr($autostyles, 25), $temp_dir.'/content.xml');
-        $this->_odtReplaceInFile('</office:automatic-styles>', substr($autostyles, 25), $temp_dir.'/styles.xml');
-        $this->_odtReplaceInFile('</office:styles>', $missingstyles.'</office:styles>', $temp_dir.'/styles.xml');
+        $value = io_readFile($temp_dir.'/content.xml');
+        $original = XMLUtil::getElement('office:automatic-styles', $value);
+        $this->_odtReplaceInFile($original, $autostyles, $temp_dir.'/content.xml');
+
+        $value = io_readFile($temp_dir.'/styles.xml');
+        $original = XMLUtil::getElement('office:automatic-styles', $value);
+        $this->_odtReplaceInFile($original, $autostyles, $temp_dir.'/styles.xml');
+
+        $value = io_readFile($temp_dir.'/styles.xml');
+        $original = XMLUtil::getElement('office:styles', $value);
+        $this->_odtReplaceInFile($original, $commonstyles, $temp_dir.'/styles.xml');
+
         $this->_odtReplaceInFile('</office:font-face-decls>', $missingfonts.'</office:font-face-decls>', $temp_dir.'/styles.xml');
 
         // Insert page styles
@@ -157,5 +199,55 @@ class ODTTemplateDH extends docHandler
         fwrite($file_f, $value);
         fclose($file_f);
     }
-}
 
+    /**
+     * @param null $source
+     */
+    public function addStyle(ODTStyle $new) {
+        return $this->styleset->addStyle($new);
+    }
+
+    /**
+     * @param null $source
+     */
+    public function addAutomaticStyle(ODTStyle $new) {
+        return $this->styleset->addAutomaticStyle($new);
+    }
+
+    /**
+     * The function style checks if a style with the given $name already exists.
+     * 
+     * @param $name Name of the style to check
+     * @return boolean
+     */
+    public function styleExists ($name) {
+        return $this->styleset->styleExists($name);
+    }
+
+    /**
+     * The function returns the style with the given name
+     * 
+     * @param $name Name of the style
+     * @return ODTStyle or NULL
+     */
+    public function getStyle ($name) {
+        return $this->styleset->getStyle($name);
+    }
+
+    /**
+     * The function returns the style names used for the basic syntax.
+     */
+    public function getStyleName($style) {
+        return $this->styleset->getStyleName($style);
+    }
+
+    /**
+     * The function returns the style at the given index
+     * 
+     * @param $element Element of the style e.g. 'office:styles'
+     * @return ODTStyle or NULL
+     */
+    public function getStyleAtIndex($element, $index) {
+        return $this->styleset->getStyleAtIndex($element, $index);
+    }
+}

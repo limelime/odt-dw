@@ -516,7 +516,8 @@ class helper_plugin_odt_config extends DokuWiki_Plugin {
 
                 // ODT-Template based export required?
                 // (old parameter)
-                if ( $name == 'template' && !empty($this->getParam ('template'))) {
+                $template = $this->getParam ('template');
+                if ( $name == 'template' && !empty($template) ) {
                     // ODT-Template chosen
                     if (file_exists($this->getParam('mediadir').'/'.$this->getParam('tpl_dir')."/".$this->getParam ('template'))) {
                         //template found
@@ -529,11 +530,16 @@ class helper_plugin_odt_config extends DokuWiki_Plugin {
                 }
 
                 // ODT-Template based export required?
-                if ( $name == 'odt_template' && !empty($this->getParam ('odt_template'))) {
+                $odt_template = $this->getParam ('odt_template');
+                if ( $name == 'odt_template' && !empty($odt_template) ) {
                     // ODT-Template chosen
                     if (file_exists($this->getParam('mediadir').'/'.$this->getParam('tpl_dir')."/".$this->getParam ('odt_template'))) {
-                        //template found
-                        $this->mode = 'ODT template';
+                        // Template found: ODT or CSS?
+                        if ( strpos ($odt_template, '.css') === false ) {
+                            $this->mode = 'ODT template';
+                        } else {
+                            $this->mode = 'CSS template';
+                        }
                     } else {
                         // template chosen but not found : warn the user and use the default template
                         $warning = sprintf($this->getLang('tpl_not_found'),$this->getParam ('odt_template'),$this->getParam ('tpl_dir'));
@@ -562,7 +568,9 @@ class helper_plugin_odt_config extends DokuWiki_Plugin {
             }
         }
 
-        if (!empty($this->getParam ('template')) && empty($this->getParam ('odt_template'))) {
+        $template = $this->getParam ('template');
+        $odt_template = $this->getParam ('odt_template');
+        if (!empty($template) && empty($odt_template)) {
             $this->setParam ('odt_template', $this->getParam ('template'));
         }
 

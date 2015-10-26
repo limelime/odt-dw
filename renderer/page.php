@@ -18,6 +18,8 @@ require_once DOKU_PLUGIN . 'odt/ODT/page.php';
 require_once DOKU_PLUGIN . 'odt/ODT/docHandler.php';
 require_once DOKU_PLUGIN . 'odt/ODT/scratchDH.php';
 require_once DOKU_PLUGIN . 'odt/ODT/ODTTemplateDH.php';
+require_once DOKU_PLUGIN . 'odt/ODT/CSSTemplateDH.php';
+require_once DOKU_PLUGIN . 'odt/ODT/ODTState.php';
 
 /**
  * The Renderer
@@ -39,8 +41,6 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     protected $import = null;
     /** @var helper_plugin_odt_units */
     protected $units = null;
-    /** @var ODTStyleSet */
-    protected $styleset = null;
     /** @var ODTMeta */
     protected $meta;
     /** @var string temporary storage of xml-content */
@@ -51,20 +51,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     /** @var helper_plugin_odt_config */
     protected $config = null;
     public $fields = array(); // set by Fields Plugin
-    protected $in_list = null;
-    protected $list_interrupted = null;
-    protected $in_list_item = false;
-    protected $in_paragraph = false;
-    protected $in_div_as_frame = 0;
+    protected $state = null;
     protected $highlight_style_num = 1;
-    protected $temp_table_column_styles = array ();
-    protected $temp_table_style = NULL;
-    protected $temp_in_header = false;
-    protected $temp_autocols = false;
-    protected $temp_maxcols = 0;
-    protected $temp_column = 0;
-    protected $temp_content = NULL;
-    protected $temp_cols = NULL;
     protected $quote_depth = 0;
     protected $quote_pos = 0;
     protected $div_z_index = 0;
@@ -82,23 +70,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     protected $pagebreak = false;
     /** @var changePageFormat */
     protected $changePageFormat = NULL;
-
-    /**
-     * Automatic styles. Will always be added to content.xml and styles.xml.
-     * Initalized by function initStyles.
-     * @var array
-     */
-    public $autostyles = array();
-    /**
-     * Regular styles. May not be present if in template mode, in which case they will be added to styles.xml
-     * Initalized by function initStyles.
-     * @var array
-     */
-    protected $styles = array();
     /** @var string */
     protected $css;
-    /** @var  string buffer for extracted template */
-    protected $temp_dir;
     /** @var  int counter for styles */
     protected $style_count;
 
@@ -113,6 +86,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $this->config = plugin_load('helper', 'odt_config');
 
         $this->factory = plugin_load('helper', 'odt_stylefactory');
+
+        $this->state = new ODTState();
 
         $this->meta = new ODTMeta();
     }
@@ -200,12 +175,6 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         // First, get export mode.
         $warning = '';
         $this->mode = $this->config->load($warning);
-        //$this->config->setParam ($, $this->getConf('format'));
-        //FIXME: output warning to document, like:
-/*                // template chosen but not found : warn the user and use the default template
-                $warning = '<text:p text:style-name="'.$this->styleset->getStyleName('body').'"><text:span text:style-name="'.$this->styleset->getStyleName('strong').'">'
-                             .$this->_xmlEntities( sprintf($this->getLang('tpl_not_found'),$this->config ['odt_template'],$this->getConf("tpl_dir")) )
-                             .'</text:span></text:p>'.$this->doc;*/
 
         // Load and import CSS files, setup Units
         $this->load_css();
@@ -219,6 +188,16 @@ class renderer_plugin_odt_page extends Doku_Renderer {
                 $this->docHandler->setDirectory($this->config->getParam ('tpl_dir'));
                 break;
 
+            case 'CSS template':
+                // Document based on DokuWiki CSS template.
+                $this->docHandler = new CSSTemplateDH ();
+                $media_sel = $this->config->getParam ('media_sel');
+                $template = $this->config->getParam ('odt_template');
+                $directory = $this->config->getParam ('tpl_dir');
+                $template_path = $this->config->getParam('mediadir').'/'.$directory."/".$template;
+                $this->docHandler->import($template_path, $media_sel);
+                break;
+
             default:
                 // Document from scratch.
                 $this->docHandler = new scratchDH ();
@@ -226,22 +205,24 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         }
 
         // Setup page format.
+        // Set the page format of the current page for calculation ($this->page)
+        // Change the standard page layout style
         $this->page = new pageFormat();
-        $this->setPageFormat($this->config->getParam ('format'),
+        $this->page->setFormat($this->config->getParam ('format'),
                              $this->config->getParam ('orientation'),
                              $this->config->getParam ('margin_top'),
                              $this->config->getParam ('margin_right'),
                              $this->config->getParam ('margin_bottom'),
                              $this->config->getParam ('margin_left'));
-        //$this->page->setFormat('A4', 'portrait');
-
-
-
-        // Load Styleset.
-        $this->styleset = new ODTDefaultStyles();
-        $this->styleset->import();
-        $this->autostyles = $this->styleset->getAutoStyles($this->page);
-        $this->styles = $this->styleset->getStyles();
+        $first_page = $this->docHandler->getStyle($this->docHandler->getStyleName('first page'));
+        if ($first_page != NULL) {
+            $first_page->setProperty('width', $this->page->getWidth().'cm');
+            $first_page->setProperty('height', $this->page->getHeight().'cm');
+            $first_page->setProperty('margin-top', $this->page->getMarginTop().'cm');
+            $first_page->setProperty('margin-right', $this->page->getMarginRight().'cm');
+            $first_page->setProperty('margin-bottom', $this->page->getMarginBottom().'cm');
+            $first_page->setProperty('margin-left', $this->page->getMarginLeft().'cm');
+        }
 
         // Set title in meta info.
         $this->meta->setTitle($ID); //FIXME article title != book title  SOLUTION: overwrite at the end for book
@@ -269,13 +250,14 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         }
 
         $this->set_page_bookmark($ID);
+
+        $this->p_open();
     }
 
     /**
      * Closes the document
      */
     function document_end(){
-        //$this->doc .= $this->_odtAutoStyles(); return; // DEBUG
         // DEBUG: The following puts out the loaded raw CSS code
         //$this->p_open();
         // This line outputs the raw CSS code
@@ -283,7 +265,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         // The next two lines output the parsed CSS rules with linebreaks
         //$test = $this->import->rulesToString();
         //$this->doc .= preg_replace ('/\n/', '<text:line-break/>', $test);
-        //$this->linebreak();
+        //$this->p_open();
         //$this->doc .= 'Tracedump: '.$this->trace_dump;
         //$this->p_close();
 
@@ -298,6 +280,9 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
         // Refresh certain config parameters e.g. 'disable_links'
         $this->config->refresh();
+
+        // Reset state.
+        $this->state->reset();
     }
 
     /**
@@ -382,22 +367,24 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $properties ['margin-bottom'] = $data ['margin-bottom'];
         $properties ['margin-left']   = $data ['margin-left'];
         $properties ['margin-right']  = $data ['margin-right'];
-        $style_name = $this->factory->createPageLayoutStyle($style_content, $properties);
+        $style_obj = $this->factory->createPageLayoutStyle($properties);
+        $style_name = $style_obj->getProperty('style-name');
 
         // Save style data in page style array, in common styles and set current page format
         $master_page_style_name = $format_string;
         $this->page_styles [$master_page_style_name] = $style_name;
-        $this->autostyles [$style_name] = $style_content;
+        $this->docHandler->addAutomaticStyle($style_obj);
         $this->page->setFormat($data ['format'], $data ['orientation'], $data['margin-top'], $data['margin-right'], $data['margin-bottom'], $data['margin-left']);
 
         // Create paragraph style.
         $properties = array();
-        $properties ['style-name']       = 'Style-'.$format_string;
-        $properties ['master-page-name'] = $master_page_style_name;
-        $properties ['style-parent']     = $parent;
-        $properties ['page-number']      = 'auto';
-        $style_name = $this->factory->createParagraphStyle($style_content, $properties);
-        $this->autostyles [$style_name] = $style_content;
+        $properties ['style-name']             = 'Style-'.$format_string;
+        $properties ['style-parent']           = $parent;
+        $properties ['style-master-page-name'] = $master_page_style_name;
+        $properties ['page-number']            = 'auto';
+        $style_obj = $this->factory->createParagraphStyle($properties);
+        $style_name = $style_obj->getProperty('style-name');
+        $this->docHandler->addAutomaticStyle($style_obj);
 
         // Save paragraph style name in 'Do not delete array'!
         $this->preventDeletetionStyles [] = $style_name;
@@ -477,11 +464,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
         // Build the document
         $this->docHandler->build($this->doc,
-                                 $this->_odtAutoStyles(),
-                                 $this->styles,
                                  $this->meta->getContent(),
                                  $this->_odtUserFields(),
-                                 $this->styleset,
                                  $this->page_styles);
 
         // Assign document
@@ -492,14 +476,14 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * Simple setter to enable creating links
      */
     function enable_links() {
-        $this->setParam ('disable_links', false);
+        $this->config->setParam ('disable_links', false);
     }
 
     /**
      * Simple setter to disable creating links
      */
     function disable_links() {
-        $this->setParam ('disable_links', true);
+        $this->config->setParam ('disable_links', true);
     }
 
     /**
@@ -622,30 +606,29 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $properties ['margin-left'] = $indent.'cm';
             $properties ['margin-right'] = '0cm';
             $properties ['text-indent'] = '0cm';
-            $style_content = '';
-            $style_name = $this->factory->createParagraphStyle($style_content, $properties);
+            $style_obj = $this->factory->createParagraphStyle($properties);
 
-            // Add paragraph style to styles array (= common styles).
-            // (It MUST be added to styles NOT to autostyles. Otherwise LibreOffice will
+            // Add paragraph style to common styles.
+            // (It MUST be added to styles NOT to automatic styles. Otherwise LibreOffice will
             //  overwrite/change the style on updating the TOC!!!)
-            $this->styles[$style_name] = $style_content;
-            $p_styles [$count+1] = $style_name;
+            $this->docHandler->addStyle($style_obj);
+            $p_styles [$count+1] = $style_obj->getProperty('style-name');
         }
 
         // Create text style for TOC text.
-        // (this MUST be a text style (not paragraph!) and MUST be placed in styles (not autostyles) to work!)
+        // (this MUST be a text style (not paragraph!) and MUST be placed in styles (not automatic styles) to work!)
         for ( $count = 0 ; $count < $max_outline_level ; $count++ ) {
             $properties = array();
             $this->_processCSSStyle ($properties, $stylesL [$count+1]);
-            $style_content = '';
-            $stylesLNames [$count+1] = $this->factory->createTextStyle($style_content, $properties);
-            $this->styles[$stylesLNames [$count+1]] = $style_content;
+            $style_obj = $this->factory->createTextStyle($properties);
+            $stylesLNames [$count+1] = $style_obj->getProperty('style-name');
+            $this->docHandler->addStyle($style_obj);
         }
 
         // Generate ODT toc tag and content
         $toc  = '<text:table-of-content text:style-name="Standard" text:protected="true" text:name="Table of Contents">';
         $toc .= '<text:table-of-content-source text:outline-level="'.$max_outline_level.'">';
-        $toc .= '<text:index-title-template text:style-name="'.$this->styleset->getStyleName('heading1').'">'.$title.'</text:index-title-template>';
+        $toc .= '<text:index-title-template text:style-name="'.$this->docHandler->getStyleName('heading1').'">'.$title.'</text:index-title-template>';
 
         // Create TOC templates per outline level.
         // The styles listed here need to be the same as later used for the headers.
@@ -666,7 +649,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $toc .= '</text:table-of-content-source>';
         $toc .= '<text:index-body>';
         $toc .= '<text:index-title text:style-name="Standard" text:name="Table of Contents_Head">';
-        $toc .= '<text:p text:style-name="'.$this->styleset->getStyleName('heading1').'">'.$title.'</text:p>';
+        $toc .= '<text:p text:style-name="'.$this->docHandler->getStyleName('heading1').'">'.$title.'</text:p>';
         $toc .= '</text:index-title>';
 
         // Add headers to TOC.
@@ -692,7 +675,6 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $toc .= '</text:table-of-content>';
 
         // Add a pagebreak if required.
-        $toc_pagebreak = $this->config->getParam('toc_pagebreak');
         if ( $toc_pagebreak ) {
             $style_name = $this->createPagebreakStyle(NULL, false);
             $toc .= '<text:p text:style-name="'.$style_name.'"/>';
@@ -859,18 +841,6 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     /**
      * @return string
      */
-    function _odtAutoStyles() {
-        $value = '<office:automatic-styles>';
-        foreach ($this->autostyles as $stylename=>$stylexml) {
-            $value .= $stylexml;
-        }
-        $value .= '</office:automatic-styles>';
-        return $value;
-    }
-
-    /**
-     * @return string
-     */
     function _odtUserFields() {
         $value = '<text:user-field-decls>';
         foreach ($this->fields as $fname=>$fvalue) {
@@ -890,7 +860,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         // Attention: NOT if $text is empty. This would lead to empty lines before headings
         //            right after a pagebreak!
         if ( !empty($text) ) {
-            if ( ($this->pagebreak || $this->changePageFormat != NULL) && !$this->in_paragraph ) {
+            $in_paragraph = $this->state->getInParagraph();
+            if ( ($this->pagebreak || $this->changePageFormat != NULL) && !$in_paragraph ) {
                 $this->p_open();
             }
         }
@@ -904,10 +875,51 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      */
     function p_open($style=NULL){
         if ( empty($style) ) {
-            $style = $this->styleset->getStyleName('body');
+            $style = $this->docHandler->getStyleName('body');
         }
-        if (!$this->in_paragraph) { // opening a paragraph inside another paragraph is illegal
-            $this->in_paragraph = true;
+
+        if ($this->state->getInListItem()) {
+            // We are in a list item. Is this the list start?
+            $list = $this->state->findClosestWithClass('list');
+            if ($list != NULL) {
+                $list_count = $this->state->countClass('list');
+                $first = $list->getListFirstParagraph();
+                $list->setListFirstParagraph(false);
+
+                // Create a style for putting a top margin for this first paragraph of the list
+                // (if not done yet, the name must be unique!)
+                $style_name = 'FirstListParagraph_'.$style;
+                $style_first = $this->docHandler->getStyle($this->docHandler->getStyleName('list first paragraph'));
+                if ($list_count == 1 && $first) {
+                    if (!$this->docHandler->styleExists($style_name)) {
+                        if ($style_first != NULL) {
+                            $style_body = $this->docHandler->getStyle($style);
+                            $style_display_name = 'First '.$style_body->getProperty('style-display-name');
+                            $style_obj = clone $style_first;
+                            if ($style_obj != NULL) {
+                                $style_obj->setProperty('style-name', $style_name);
+                                $style_obj->setProperty('style-parent', $style);
+                                $style_obj->setProperty('style-display-name', $style_display_name);
+                                $bottom = $style_first->getProperty('margin-bottom');
+                                if ($bottom === NULL) {
+                                    $style_obj->setProperty('margin-bottom', $style_body->getProperty('margin-bottom'));
+                                }
+                                $this->docHandler->addStyle($style_obj);
+                                $style = $style_name;
+                            }
+                        }
+                    } else {
+                        $style = $style_name;
+                    }
+                }
+            }
+        }
+        
+        // opening a paragraph inside another paragraph is illegal
+        $in_paragraph = $this->state->getInParagraph();
+        if (!$in_paragraph) {
+            $this->state->enter('text:p', 'paragraph');
+            $this->state->setInParagraph(true);
             if ( $this->changePageFormat != NULL ) {
                 $page_style = $this->doPageFormatChange($style);
                 if ( $page_style != NULL ) {
@@ -931,9 +943,10 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function p_close(){
-        if ($this->in_paragraph) {
-            $this->in_paragraph = false;
+        $in_paragraph = $this->state->getInParagraph();
+        if ($in_paragraph) {
             $this->doc .= '</text:p>';
+            $this->state->leave();
         }
     }
 
@@ -957,7 +970,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param string $id    ID of the bookmark
      */
     function set_page_bookmark($id){
-        if ( $this->in_paragraph ) {
+        $in_paragraph = $this->state->getInParagraph();
+        if ( $in_paragraph ) {
             $this->insert_bookmark($id);
         } else {
             $this->pageBookmark = $id;
@@ -975,7 +989,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $this->p_close();
         $hid = $this->_headerToLink($text,true);
         $TOCRef = $this->_buildTOCReferenceID($text);
-        $style = $this->styleset->getStyleName('heading'.$level);
+        $style = $this->docHandler->getStyleName('heading'.$level);
         if ( $this->changePageFormat != NULL ) {
             $page_style = $this->doPageFormatChange($style);
             if ( $page_style != NULL ) {
@@ -1004,14 +1018,19 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $this->doc .= '</text:h>';
 
         // Do not add headings in frames
-        if ( $this->in_div_as_frame == 0 ) {
+        if (!$this->state->getInFrame()) {
             $this->toc_additem($TOCRef, $hid, $text, $level);
         }
     }
 
     function hr() {
         $this->p_close();
-        $this->doc .= '<text:p text:style-name="'.$this->styleset->getStyleName('horizontal line').'"/>';
+        $style_name = $this->docHandler->getStyleName('horizontal line');
+        $this->p_open($style_name);
+        $this->p_close();
+
+        // Save paragraph style name in 'Do not delete array'!
+        $this->preventDeletetionStyles [] = $style_name;
     }
 
     function linebreak() {
@@ -1020,20 +1039,20 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
     protected function createPagebreakStyle($parent=NULL,$before=true) {
         $style_name = 'pagebreak';
-        $attr = 'fo:break-before';
         if ( !$before ) {
             $style_name .= '_after';
-            $attr = 'fo:break-after';
         }
         if ( !empty($parent) ) {
             $style_name .= '_'.$parent;
         }
-        if ( empty ($this->autostyles[$style_name]) ) {
-            $this->autostyles[$style_name] = '<style:style style:name="'.$style_name.'" style:family="paragraph" style:parent-style-name="'.$parent.'"><style:paragraph-properties '.$attr.'="page"/></style:style>';
+        if ( !$this->docHandler->styleExists($style_name) ) {
+            $style_obj = $this->factory->createPagebreakStyle($style_name, $parent, $before);
+            $this->docHandler->addAutomaticStyle($style_obj);
 
             // Save paragraph style name in 'Do not delete array'!
             $this->preventDeletetionStyles [] = $style_name;
         }
+        
         return $style_name;
     }
 
@@ -1047,7 +1066,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function strong_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('strong').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('strong').'">';
     }
 
     function strong_close() {
@@ -1055,7 +1074,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function emphasis_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('emphasis').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('emphasis').'">';
     }
 
     function emphasis_close() {
@@ -1063,7 +1082,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function underline_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('underline').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('underline').'">';
     }
 
     function underline_close() {
@@ -1071,7 +1090,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function monospace_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('monospace').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('monospace').'">';
     }
 
     function monospace_close() {
@@ -1079,7 +1098,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function subscript_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('sub').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('sub').'">';
     }
 
     function subscript_close() {
@@ -1087,7 +1106,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function superscript_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('sup').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('sup').'">';
     }
 
     function superscript_close() {
@@ -1095,58 +1114,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     function deleted_open() {
-        $this->doc .= '<text:span text:style-name="'.$this->styleset->getStyleName('del').'">';
+        $this->doc .= '<text:span text:style-name="'.$this->docHandler->getStyleName('del').'">';
     }
 
     function deleted_close() {
         $this->doc .= '</text:span>';
-    }
-
-    /**
-     * Interrupt a list and set variables to continue it later
-     * in form of a new list continuing the numbering.
-     *
-     * This is necessary if a table is part of a list item as in the ODT
-     * format a table:table element may not be included or be child of a list item.
-     */
-    protected function interruptList () {
-        if ($this->in_list) {
-            $this->listcontent_close();
-            $this->listitem_close();
-
-            switch($this->in_list) {
-                case 'listu':
-                    $this->listu_close();
-                    $this->list_interrupted = 'listu';
-                    break;
-                case 'listo':
-                    $this->listo_close();
-                    $this->list_interrupted = 'listo';
-                    break;
-            }
-        }
-    }
-
-    /**
-     * Continue/re-open a list previously closed/interrupted by
-     * calling interruptList ().
-     */
-    protected function continueList () {
-        if ($this->list_interrupted != null) {
-            switch($this->list_interrupted) {
-                case 'listu':
-                    $this->listu_open(true);
-                    break;
-                case 'listo':
-                    $this->listo_open(true);
-                    break;
-            }
-            // list_interrupted will be reset on the next call to listitem_open():
-            // the parser will still call listcontent_close() and listitem_close()
-            // and this functions may do nothing until the next item is opened.
-            // The last list item has been closed on opening the table!
-            //$this->list_interrupted = null;
-        }
     }
 
     /*
@@ -1160,32 +1132,142 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param int $numrows NOT IMPLEMENTED
      */
     function table_open($maxcols = NULL, $numrows = NULL){
-        // Do additional actions required if we are in a list
-        $this->interruptList ();
+        // Do additional actions if the parent element is a list.
+        // In this case we need to finish the list and re-open it later
+        // after the table has been closed! --> tables may not be part of a list item in ODT!
+
+        $interrupted = false;
+        $table_style_name = $this->docHandler->getStyleName('table');
         
-        $this->doc .= '<table:table>';
+        if ($this->state->getInListItem()) {
+            // We are in a list item. Query indentation settings.
+            $list = $this->state->findClosestWithClass('list');
+            if ($list != NULL) {
+                $list_style_name = $list->getStyleName();
+                $list_style = $this->docHandler->getStyle($list_style_name);
+                if ($list_style != NULL) {
+                    // The list level stored in the list item/from the parser
+                    // might not be correct. Count 'list' states to get level.
+                    $level = $this->state->countClass('list');
+
+                    // Create a table style for indenting the table.
+                    // We try to achieve this by substracting the list indentation
+                    // from the width of the table and right align it!
+                    // (if not done yet, the name must be unique!)
+                    $style_name = 'Table_Indentation_Level'.$level;
+                    if (!$this->docHandler->styleExists($style_name)) {
+                        $properties = array();
+                        $properties ['style-name'] = $style_name;
+                        $style_obj = $this->factory->createTableTableStyle($properties);
+                        if ($style_obj != NULL) {
+                            $max = $this->page->getAbsWidthMindMargins();
+                            $indent = 0 + $this->units->getDigits($list_style->getPropertyFromLevel($level, 'margin-left'));
+                            $style_obj->setProperty('width', ($max-$indent).'cm');
+                            $style_obj->setProperty('align', 'right');
+                            $this->docHandler->addAutomaticStyle($style_obj);
+                        }
+                    }
+                    $table_style_name = $style_name;
+                }
+            }
+
+            // Close all open lists and remember their style (may be nested!)
+            $lists = array();
+            $first = true;
+            $iterations = 0;
+            while ($this->state->getInList() === true)
+            {
+                // Close list items
+                if ($first == true) {
+                    $first = false;
+                    $this->listcontent_close();
+                }
+                $this->listitem_close();
+                
+                // Now we are in the list state!
+                // Get the lists style name before closing it.
+                $lists [] = $this->state->getStyleName();
+                $this->list_close();
+                
+                if ($this->state == NULL || $this->state->getElement() == 'root') {
+                    break;
+                }
+                
+                // Just to prevent endless loops in case of an error!
+                $iterations++;
+                if ($iterations == 50) {
+                    $this->doc .= 'Error: ENDLESS LOOP!';
+                    break;
+                }
+            }
+
+            $interrupted = true;
+        }
+        
+        $this->state->enter('table:table', 'table');
+        if ($interrupted == true) {
+            // Set marker that list has been interrupted
+            $this->state->setListInterrupted(true);
+
+            // Save the lists array as temporary data
+            // in THIS state because this is the state that we get back
+            // to in table_close!!!
+            // (we closed the ODT list, we can't access its state info anymore!
+            //  So we use the table state to save the style name!)
+            $this->state->setTemp($lists);
+        }
+        
+        if ($table_style_name == NULL) {
+            $this->doc .= '<table:table>';
+        } else {
+            $this->doc .= '<table:table table:style-name="'.$table_style_name.'">';
+        }
         for($i=0; $i<$maxcols; $i++){
             $this->doc .= '<table:table-column />';
         }
     }
 
     function table_close(){
-        $this->doc .= '</table:table>';
+        $interrupted = false;
+        if ($this->state->getListInterrupted()) {
+            $interrupted = true;
+            $lists = $this->state->getTemp();
+        }
 
-        // Do additional actions required if we interripted a list,
+        $this->doc .= '</table:table>';
+        $this->state->leave();
+
+        // Do additional actions required if we interrupted a list,
         // see table_open()
-        $this->continueList ();
+        if ($interrupted) {
+            // Re-open list(s) with original style!
+            // (in revers order of lists array)
+            $max = count($lists);
+            for ($index = $max ; $index > 0 ; $index--) {
+                $this->list_open(true, $lists [$index-1]);
+                
+                // If this is not the most inner list then we need to open
+                // a list item too!
+                if ($index > 0) {
+                    $this->listitem_open($max-$index);
+                }
+            }
+
+            // DO NOT set marker that list is not interrupted anymore, yet!
+            // The renderer will still call listcontent_close and listitem_close!
+            // The marker will only be reset on the next call from the renderer to listitem_open!!!
+            //$this->state->setListInterrupted(false);
+        }
     }
 
     function tablerow_open(){
+        $this->state->enter('table:table-row', 'table-row');
         $this->doc .= '<table:table-row>';
     }
 
     function tablerow_close(){
         $this->doc .= '</table:table-row>';
-
-        // Reset temporary column counter
-        //$this->temp_column = 0;
+        $this->state->leave();
     }
 
     /**
@@ -1196,7 +1278,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param int    $rowspan
      */
     function tableheader_open($colspan = 1, $align = "left", $rowspan = 1){
-        $this->doc .= '<table:table-cell office:value-type="string" table:style-name="'.$this->styleset->getStyleName('table header').'" ';
+        // ODT has no element for the table header.
+        // We mark the state with a differnt class to be able
+        // to differ between a normal cell and a header cell.
+        $this->state->enter('table:table-cell', 'table-header');
+        $this->doc .= '<table:table-cell office:value-type="string" table:style-name="'.$this->docHandler->getStyleName('table header').'" ';
         //$this->doc .= ' table:style-name="tablealign'.$align.'"';
         if ( $colspan > 1 ) {
             $this->doc .= ' table:number-columns-spanned="'.$colspan.'"';
@@ -1205,12 +1291,16 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $this->doc .= ' table:number-rows-spanned="'.$rowspan.'"';
         }
         $this->doc .= '>';
-        $this->p_open($this->styleset->getStyleName('table heading'));
+
+        // A new table cell allows opening of a new paragraph!
+        $this->state->setInParagraph(false);
+        $this->p_open($this->docHandler->getStyleName('table heading'));
     }
 
     function tableheader_close(){
         $this->p_close();
         $this->doc .= '</table:table-cell>';
+        $this->state->leave();
     }
 
     /**
@@ -1221,7 +1311,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param int    $rowspan
      */
     function tablecell_open($colspan = 1, $align = "left", $rowspan = 1){
-        $this->doc .= '<table:table-cell office:value-type="string" table:style-name="'.$this->styleset->getStyleName('table cell').'" ';
+        $this->state->enter('table:table-cell', 'table-cell');
+        $this->doc .= '<table:table-cell office:value-type="string" table:style-name="'.$this->docHandler->getStyleName('table cell').'" ';
         if ( $colspan > 1 ) {
             $this->doc .= ' table:number-columns-spanned="'.$colspan.'"';
         }
@@ -1230,13 +1321,17 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         }
         $this->doc .= '>';
         if (!$align) $align = "left";
-        $style = $this->styleset->getStyleName('tablealign '.$align);
+        $style = $this->docHandler->getStyleName('tablealign '.$align);
+
+        // A new table cell allows opening of a new paragraph!
+        $this->state->setInParagraph(false);
         $this->p_open($style);
     }
 
     function tablecell_close(){
         $this->p_close();
         $this->doc .= '</table:table-cell>';
+        $this->state->leave();
     }
 
     /**
@@ -1277,50 +1372,64 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             // its a new footnote, add it to the $footnotes array
             $this->footnotes[$i] = $footnote;
 
+            // Enter footnote state and allow new paragraph!
+            $this->state->enter('text:note', 'footnote');
+            $this->state->setInParagraph(false);
+
             $this->doc .= '<text:note text:id="ftn'.$i.'" text:note-class="footnote">';
             $this->doc .= '<text:note-citation>'.($i+1).'</text:note-citation>';
             $this->doc .= '<text:note-body>';
-            //FIXME: Can break document if paragraphs have been opened inside of $footnote!!!
-            $this->doc .= '<text:p text:style-name="'.$this->styleset->getStyleName('footnote').'">';
+            $this->p_open($this->docHandler->getStyleName('footnote'));
             $this->doc .= $footnote;
-            $this->doc .= '</text:p>';
+            $this->p_close();
             $this->doc .= '</text:note-body>';
             $this->doc .= '</text:note>';
 
+            // Leave footnote state
+            $this->state->leave();
         } else {
             // seen this one before - just reference it FIXME: style isn't correct yet
             $this->doc .= '<text:note-ref text:note-class="footnote" text:ref-name="ftn'.$i.'">'.($i+1).'</text:note-ref>';
         }
     }
 
-    function listu_open($continue=false) {
+    function list_open($continue=false, $style) {
         $this->p_close();
-        $this->doc .= '<text:list text:style-name="'.$this->styleset->getStyleName('list').'"';
+
+        $this->doc .= '<text:list text:style-name="'.$style.'"';
         if ($continue) {
             $this->doc .= ' text:continue-numbering="true" ';
         }
         $this->doc .= '>';
-        $this->in_list = 'listu';
+
+        $this->state->enter('text:list', 'list');
+        $this->state->setStyleName($style);
+        $this->state->setInList(true);
+    }
+
+    function list_close() {
+        if ($this->state->getListInterrupted()) {
+            // Do not do anything as long as list is interrupted
+            return;
+        }
+        $this->doc .= '</text:list>';
+        $this->state->leave();
+    }
+
+    function listu_open($continue=false) {
+        $this->list_open($continue, $this->docHandler->getStyleName('list'));
     }
 
     function listu_close() {
-        $this->doc .= '</text:list>';
-        $this->in_list = null;
+        $this->list_close();
     }
 
     function listo_open($continue=false) {
-        $this->p_close();
-        $this->doc .= '<text:list text:style-name="'.$this->styleset->getStyleName('numbering').'"';
-        if ($continue) {
-            $this->doc .= ' text:continue-numbering="true" ';
-        }
-        $this->doc .= '>';
-        $this->in_list = 'listo';
+        $this->list_open($continue, $this->docHandler->getStyleName('numbering'));
     }
 
     function listo_close() {
-        $this->doc .= '</text:list>';
-        $this->in_list = null;
+        $this->list_close();
     }
     /**
      * Open a list item
@@ -1328,30 +1437,64 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param int $level the nesting level
      */
     function listitem_open($level) {
-        $this->list_interrupted = null;
-        $this->in_list_item = true;
+        // Set marker that list interruption has stopped!!!
+        if ($this->state != NULL ) {
+            $this->state->setListInterrupted(false);
+        }
+        
         $this->doc .= '<text:list-item>';
+
+        if ($this->state != NULL ) {
+            $this->state->enter('text:list-item', 'list-item');
+            $this->state->setInListItem(true);
+            // Attention:
+            // we save the list level here but it might be wrong.
+            // Someone can start a list with level 2 without having created
+            // a list with level 1 before.
+            // When the correct list level is needed better use
+            // $this->state->countClass('list'), see table_open().
+            $this->state->setListItemLevel($level);
+
+            // A new list items allows opening of a new paragraph
+            $this->state->setInParagraph(false);
+
+        }
     }
 
     function listitem_close() {
-        if ($this->list_interrupted != null) {
+        if ($this->state->getListInterrupted()) {
             // Do not do anything as long as list is interrupted
             return;
         }
-        $this->in_list_item = false;
         $this->doc .= '</text:list-item>';
+        $this->state->leave();
     }
 
     function listcontent_open() {
-        $this->doc .= '<text:p text:style-name="'.$this->styleset->getStyleName('body').'">';
+        // The default style for list content is body but it should always be
+        // overwritten. It's just assigned here to guarantee some style name is
+        // always set in case of an error also.
+        $style_name = $this->docHandler->getStyleName('body');
+        $list = $this->state->findClosestWithClass('list');
+        if ($list != NULL) {
+            $list_style_name = $list->getStyleName();
+            if ($list_style_name == $this->docHandler->getStyleName('list')) {
+                $style_name = $this->docHandler->getStyleName('list content');
+            }
+            if ($list_style_name == $this->docHandler->getStyleName('numbering')) {
+                $style_name = $this->docHandler->getStyleName('numbering content');
+            }
+        }
+
+        $this->p_open($style_name);
     }
 
     function listcontent_close() {
-        if ($this->list_interrupted != null) {
+        if ($this->state->getListInterrupted()) {
             // Do not do anything as long as list is interrupted
             return;
         }
-        $this->doc .= '</text:p>';
+        $this->p_close();
     }
 
     /**
@@ -1518,7 +1661,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         if ( $this->quote_depth < 5 ) {
             $this->quote_depth++;
         }
-        $quotation1 = $this->styleset->getStyleName('quotation1');
+        $quotation1 = $this->docHandler->getStyleName('quotation1');
         if ($this->quote_depth == 1) {
             // On quote level 1 open a new paragraph with 'quotation1' style
             $this->p_close();
@@ -1538,7 +1681,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         if ( $this->quote_depth > 0 ) {
             $this->quote_depth--;
         }
-        if ($this->quote_depth == 0 && $this->in_paragraph) { // only close the paragraph if we're actually in one
+        if ($this->quote_depth == 0) {
+            // This will only close the paragraph if we're actually in one
             $this->p_close();
         }
     }
@@ -1561,7 +1705,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      */
     function _preformatted($text, $style=null, $notescaped=true) {
         if (empty($style)) {
-            $style = $this->styleset->getStyleName('preformatted');
+            $style = $this->docHandler->getStyleName('preformatted');
         }
         if ($notescaped) {
             $text = $this->_xmlEntities($text);
@@ -1574,16 +1718,19 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $text = str_replace("\t",'<text:tab/>',$text);
         $text = preg_replace_callback('/(  +)/',array($this,'_preserveSpace'),$text);
 
-        if ($this->in_list_item) { // if we're in a list item, we must close the <text:p> tag
-            $this->doc .= '</text:p>';
-            $this->doc .= '<text:p text:style-name="'.$style.'">';
+        if ($this->state->getInListItem()) {
+            // if we're in a list item, we must close the <text:p> tag
+            $this->p_close();
+            $this->p_open($style);
             $this->doc .= $text;
-            $this->doc .= '</text:p>';
-            $this->doc .= '<text:p>';
+            $this->p_close();
+            // FIXME: query previous style before preformatted text was opened and re-use it here
+            $this->p_open();
         } else {
-            $this->doc .= '<text:p text:style-name="'.$style.'">';
+            $this->p_close();
+            $this->p_open($style);
             $this->doc .= $text;
-            $this->doc .= '</text:p>';
+            $this->p_close();
         }
     }
 
@@ -1593,30 +1740,23 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param string $language
      */
     function _highlight($type, $text, $language=null) {
-        $style_name = $this->styleset->getStyleName('source code');
-        if ($type == "file") $style_name = $this->styleset->getStyleName('source file');
+        $style_name = $this->docHandler->getStyleName('source code');
+        if ($type == "file") $style_name = $this->docHandler->getStyleName('source file');
 
         if (is_null($language)) {
             $this->_preformatted($text, $style_name);
             return;
         }
 
-        // from inc/parserutils.php:p_xhtml_cached_geshi()
-        $geshi = new GeSHi($text, $language, DOKU_INC . 'inc/geshi');
-        $geshi->set_encoding('utf-8');
-        // $geshi->enable_classes(); DO NOT WANT !
-        $geshi->set_header_type(GESHI_HEADER_PRE);
-        $geshi->enable_keyword_links(false);
+        // Use cahched geshi
+        $highlighted_code = p_xhtml_cached_geshi($text, $language, '');
 
-        // remove GeSHi's wrapper element (we'll replace it with our own later)
-        // we need to use a GeSHi wrapper to avoid <BR> throughout the highlighted text
-        $highlighted_code = trim(preg_replace('!^<pre[^>]*>|</pre>$!','',$geshi->parse_code()),"\n\r");
         // remove useless leading and trailing whitespace-newlines
         $highlighted_code = preg_replace('/^&nbsp;\n/','',$highlighted_code);
         $highlighted_code = preg_replace('/\n&nbsp;$/','',$highlighted_code);
         // replace styles
         $highlighted_code = str_replace("</span>", "</text:span>", $highlighted_code);
-        $highlighted_code = preg_replace_callback('/<span style="([^"]+)">/', array($this,'_convert_css_styles'), $highlighted_code);
+        $highlighted_code = preg_replace_callback('/<span class="([^"]+)">/', array($this, '_convert_css_styles'), $highlighted_code);
         // cleanup leftover span tags
         $highlighted_code = preg_replace('/<span[^>]*>/', "<text:span>", $highlighted_code);
         $highlighted_code = str_replace("&nbsp;", "&#xA0;", $highlighted_code);
@@ -1628,31 +1768,21 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @return string
      */
     function _convert_css_styles($matches) {
-        $all_css_styles = $matches[1];
-        // parse the CSS attribute
-        $css_styles = array();
-        foreach(explode(";", $all_css_styles) as $css_style) {
-            $css_style_array = explode(":", $css_style);
-            if (!trim($css_style_array[0]) or !trim($css_style_array[1])) {
-                continue;
-            }
-            $css_styles[trim($css_style_array[0])] = trim($css_style_array[1]);
+        $class = $matches[1];
+        
+        // Get CSS properties for that geshi class and create
+        // the text style (if not already done)
+        $style_name = 'highlight_'.$class;
+        if (!$this->docHandler->styleExists($style_name)) {
+            $properties = array();
+            $properties ['style-name'] = $style_name;
+            $this->getODTProperties ($properties, NULL, 'code '.$class, NULL, 'screen');
+
+            $style_obj = $this->factory->createTextStyle($properties);
+            $this->docHandler->addAutomaticStyle($style_obj);
         }
-        // create the ODT xml style
-        $style_name = "highlight." . $this->highlight_style_num;
-        $this->highlight_style_num += 1;
-        $style_content = '
-            <style:style style:name="'.$style_name.'" style:family="text">
-                <style:text-properties ';
-        foreach($css_styles as $style_key=>$style_value) {
-            // Hats off to those who thought out the OpenDocument spec: styling syntax is similar to CSS !
-            $style_content .= 'fo:'.$style_key.'="'.$style_value.'" ';
-        }
-        $style_content .= '/>
-            </style:style>';
-        // add the style to the library
-        $this->autostyles[$style_name] = $style_content;
-        // now make use of the new style
+        
+        // Now make use of the new style
         return '<text:span text:style-name="'.$style_name.'">';
     }
 
@@ -1868,10 +1998,15 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $found = false;
             foreach ($this->toc as $item) {
                 $params = explode (',', $item);
+
                 if ( $page == $params [1] ) {
                     $found = true;
                     $link  = '<text:a xlink:type="simple" xlink:href="#'.$params [0].'">';
-                    $link .= $text;
+                    if ( !empty($name) ) {
+                        $link .= $name;
+                    } else {
+                        $link .= $text;
+                    }
                     $link .= '</text:a>';
 
                     $this->doc = str_replace ($match, $link, $this->doc);
@@ -1938,7 +2073,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      */
     function locallink($hash, $name = NULL){
         $name  = $this->_getLinkTitle($name, $hash, $isImage);
-        $this->doc .= '<locallink>'.$name.'</locallink>';
+        $this->doc .= '<locallink name="'.$name.'">'.$hash.'</locallink>';
     }
 
     /**
@@ -2203,15 +2338,19 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $anchor = 'as-char';
         }
 
-        if (!$style or !array_key_exists($style, $this->autostyles)) {
-            $style = $this->styleset->getStyleName('media '.$align);
+        if (!$style or !$this->docHandler->styleExists($style)) {
+            $style = $this->docHandler->getStyleName('media '.$align);
         }
+
+        // Enter Frame state and allow new paragraph.
+        $this->state->enter('frame', 'frame');
+        $this->state->setInParagraph(false);
 
         if ($title) {
             $this->doc .= '<draw:frame draw:style-name="'.$style.'" draw:name="'.$this->_xmlEntities($title).' Legend"
                             text:anchor-type="'.$anchor.'" draw:z-index="0" svg:width="'.$width.'">';
             $this->doc .= '<draw:text-box>';
-            $this->doc .= '<text:p text:style-name="'.$this->styleset->getStyleName('legend center').'">';
+            $this->p_open($this->docHandler->getStyleName('legend center'));
         }
         $this->doc .= '<draw:frame draw:style-name="'.$style.'" draw:name="'.$this->_xmlEntities($title).'"
                         text:anchor-type="'.$anchor.'" draw:z-index="0"
@@ -2220,8 +2359,13 @@ class renderer_plugin_odt_page extends Doku_Renderer {
                         xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>';
         $this->doc .= '</draw:frame>';
         if ($title) {
-            $this->doc .= $this->_xmlEntities($title).'</text:p></draw:text-box></draw:frame>';
+            $this->doc .= $this->_xmlEntities($title);
+            $this->p_close();
+            $this->doc .= '</draw:text-box></draw:frame>';
         }
+        
+        // Leave Frame state
+        $this->state->leave();
     }
 
     /**
@@ -2279,15 +2423,15 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $anchor = 'as-char';
         }
 
-        if (!$style or !array_key_exists($style, $this->autostyles)) {
-            $style = $this->styleset->getStyleName('media '.$align);
+        if (!$style or !$this->docHandler->styleExists($style)) {
+            $style = $this->docHandler->getStyleName('media '.$align);
         }
 
         if ($title) {
             $doc .= '<draw:frame draw:style-name="'.$style.'" draw:name="'.$this->_xmlEntities($title).' Legend"
                             text:anchor-type="'.$anchor.'" draw:z-index="0" svg:width="'.$width.'">';
             $doc .= '<draw:text-box>';
-            $doc .= '<text:p text:style-name="'.$this->styleset->getStyleName('legend center').'">';
+            $doc .= '<text:p text:style-name="'.$this->docHandler->getStyleName('legend center').'">';
         }
         $doc .= '<draw:frame draw:style-name="'.$style.'" draw:name="'.$this->_xmlEntities($title).'"
                         text:anchor-type="'.$anchor.'" draw:z-index="0"
@@ -2298,6 +2442,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         if ($title) {
             $doc .= $this->_xmlEntities($title).'</text:p></draw:text-box></draw:frame>';
         }
+
         if($returnonly) {
           return $doc;
         } else {
@@ -2429,10 +2574,12 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
             // Define graphic style for picture
             $style_name = 'odt_auto_style_span_graphic_'.$this->style_count;
-            $image_style = '<style:style style:name="'.$style_name.'" style:family="graphic" style:parent-style-name="'.$this->styleset->getStyleName('graphics').'"><style:graphic-properties style:vertical-pos="middle" style:vertical-rel="text" style:horizontal-pos="from-left" style:horizontal-rel="paragraph" fo:background-color="'.$odt_bg.'" style:flow-with-text="true"></style:graphic-properties></style:style>';
+            $image_style = '<style:style style:name="'.$style_name.'" style:family="graphic" style:parent-style-name="'.$this->docHandler->getStyleName('graphics').'"><style:graphic-properties style:vertical-pos="middle" style:vertical-rel="text" style:horizontal-pos="from-left" style:horizontal-rel="paragraph" fo:background-color="'.$odt_bg.'" style:flow-with-text="true"></style:graphic-properties></style:style>';
 
             // Add style and image to our document
-            $this->autostyles[$style_name] = $image_style;
+            // (as unknown style because style-family graphic is not supported)
+            $style_obj = ODTUnknownStyle::importODTStyle($image_style);
+            $this->docHandler->addAutomaticStyle($style_obj);
             $this->_odtAddImage ($picture,NULL,NULL,NULL,NULL,$style_name);
         }
 
@@ -2520,11 +2667,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     function _odtParagraphOpenUseProperties($properties){
         $disabled = array ();
 
-        if ($this->in_paragraph) {
+        $in_paragraph = $this->state->getInParagraph();
+        if ($in_paragraph) {
             // opening a paragraph inside another paragraph is illegal
             return;
         }
-        $this->in_paragraph = true;
 
         $odt_bg = $properties ['background-color'];
         $picture = $properties ['background-image'];
@@ -2536,10 +2683,12 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             // Define graphic style for picture
             $this->style_count++;
             $style_name = 'odt_auto_style_span_graphic_'.$this->style_count;
-            $image_style = '<style:style style:name="'.$style_name.'" style:family="graphic" style:parent-style-name="'.$this->styleset->getStyleName('graphics').'"><style:graphic-properties style:vertical-pos="middle" style:vertical-rel="text" style:horizontal-pos="from-left" style:horizontal-rel="paragraph" fo:background-color="'.$odt_bg.'" style:flow-with-text="true"></style:graphic-properties></style:style>';
+            $image_style = '<style:style style:name="'.$style_name.'" style:family="graphic" style:parent-style-name="'.$this->docHandler->getStyleName('graphics').'"><style:graphic-properties style:vertical-pos="middle" style:vertical-rel="text" style:horizontal-pos="from-left" style:horizontal-rel="paragraph" fo:background-color="'.$odt_bg.'" style:flow-with-text="true"></style:graphic-properties></style:style>';
 
             // Add style and image to our document
-            $this->autostyles[$style_name] = $image_style;
+            // (as unknown style because style-family graphic is not supported)
+            $style_obj = ODTUnknownStyle::importODTStyle($image_style);
+            $this->docHandler->addAutomaticStyle($style_obj);
             $this->_odtAddImage ($picture,NULL,NULL,NULL,NULL,$style_name);
         }
 
@@ -2548,7 +2697,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $style_name = $this->_createParagraphStyle ($properties, $disabled);
 
         // Open a paragraph
-        $this->doc .= '<text:p text:style-name="'.$style_name.'">';
+        $this->p_open($style_name);
     }
 
     /**
@@ -2571,8 +2720,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param null $element
      */
     function _odtDivOpenAsFrameUseCSS (helper_plugin_odt_cssimport $import, $classes, $baseURL = NULL, $element = NULL) {
-        $this->in_div_as_frame++;
-        if ( $this->in_div_as_frame > 1 ) {
+        if ($this->state->getInFrame()) {
             // Do not open a nested frame as this will make the content ofthe nested frame disappear.
             return;
         }
@@ -2701,11 +2849,15 @@ class renderer_plugin_odt_page extends Doku_Renderer {
              <style:paragraph-properties
               fo:margin-left="'.$padding_left.'pt" fo:margin-right="10pt" fo:text-indent="0cm"/>
          </style:style>';
-        $this->autostyles[$style_name] = $style;
+                
+        // Add style to our document
+        // (as unknown style because style-family graphic is not supported)
+        $style_obj = ODTUnknownStyle::importODTStyle($style);
+        $this->docHandler->addAutomaticStyle($style_obj);
 
         // Group the frame so that they are stacked one on each other.
         $this->p_close();
-        $this->doc .= '<text:p>';
+        $this->p_open();
         if ( $display == NULL ) {
             $this->doc .= '<draw:g>';
         } else {
@@ -2740,6 +2892,12 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $this->doc .= 'draw:corner-radius="'.$radius.'" ';
 
         $this->doc .= '>';
+        
+        // Enter frame state and allow new paragraph!
+        $this->state->enter('frame', 'frame');
+        $this->state->setInFrame(true);
+        $this->state->setInParagraph(false);
+
         $this->p_open($style_name.'_text_box');
     }
 
@@ -2836,104 +2994,108 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param null $numrows
      */
     function _odtTableOpenUseProperties ($properties, $maxcols = NULL, $numrows = NULL){
-        unset ($this->temp_content);
-
-        // We are starting a new table header declaration.
-        // The flag will be set to false on opening the first table cell of the body.
-        $this->temp_in_header = true;
-
+        $this->p_close();
+        
         // Create style.
-        $style_name = $this->factory->createTableTableStyle ($style, $properties, NULL, $this->_getAbsWidthMindMargins (100));
-        $this->autostyles[$style_name] = $style;
+        $style_obj = $this->factory->createTableTableStyle ($properties, NULL, $this->_getAbsWidthMindMargins (100));
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
+
+        // Open the table referencing our style.
+        $this->doc .= '<table:table table:style-name="'.$style_name.'">';
+        $this->state->enter('table', 'table');
         if ( empty ($properties ['width']) ) {
             // If the caller did not specify a table width, save the style name
             // to eventually later replace the table width set in createTableTableStyle()
             // with the sum of all column width (in _odtTableClose).
-            $this->temp_table_style = $style_name;
-        }
-
-        // Open the table referencing our style.
-        $this->doc .= '<table:table table:style-name="'.$style_name.'">';
-
-        // Delete any old values in the temporary column styles array.
-        for ( $column = 0 ; $column < count($this->temp_table_column_styles) ; $column++ ) {
-            unset($this->temp_table_column_styles [$column]);
+            $this->state->setTableStyle($style_name);
         }
 
         // Create columns with predefined and temporarily remembered style names.
         if ( empty ($maxcols) ) {
             // Try to automatically detect the number of columns.
-            $this->temp_autocols = true;
+            $this->state->setTableAutoColumns(true);
             $this->doc .= '<ColumnsPlaceholder>';
-            unset ($this->temp_cols);
         } else {
-            $this->temp_autocols = false;
+            $this->state->setTableAutoColumns(false);
 
+            $table_column_styles = $this->state->getTableColumnStyles();
             for ( $column = 0 ; $column < $maxcols ; $column++ ) {
                 $this->style_count++;
                 $style_name = 'odt_auto_style_table_column_'.$this->style_count;
-                $this->temp_table_column_styles [$column] = $style_name;
+                $table_column_styles [$column] = $style_name;
 
                 $this->doc .= '<table:table-column table:style-name="'.$style_name.'"/>';
             }
         }
 
-        // Reset temporary column counter
-        $this->temp_column = 0;
-        $this->temp_maxcols = 0;
+        // We start with the first column
+        $this->state->setTableCurrentColumn(0);
     }
 
     protected function _replaceTableWidth () {
         $matches = array ();
 
-        if ( empty($this->temp_table_style) || empty($this->temp_cols) ) {
+        $table = $this->state->findClosestWithClass('table', 'table');
+        if ($table == NULL) {
+            // ??? Should not happen.
+            return;
+        }
+
+        $table_style = $table->getTableStyle();
+        $column_defs = $table->getTableColumnDefs();
+        if ( empty($table_style) || empty($column_defs) ) {
             return;
         }
 
         // Search through all column styles for the column width ('style:width="..."').
         // If every column has a absolute width set, add them all and replace the table
-        // with with the result.
+        // width with the result.
         // Abort if a column has a percentage width or no width.
         $sum = 0;
-        for ($index = 0 ; $index < $this->temp_maxcols ; $index++ ) {
-            $style_name = $this->temp_table_column_styles [$index];
-            $found = preg_match ('/style:column-width="[^"]*"/', $this->autostyles[$style_name], $matches);
-            if ( $found != 1 ) {
+        $table_column_styles = $table->getTableColumnStyles();
+        for ($index = 0 ; $index < $table->getTableMaxColumns() ; $index++ ) {
+            $style_name = $table_column_styles [$index];
+            $style_obj = $this->docHandler->getStyle($style_name);
+            if ($style_obj != NULL && $style_obj->getProperty('column-width') != NULL) {
+                $width = $style_obj->getProperty('column-width');
+                $length = strlen ($width);
+                $width = $this->units->toPoints($width, 'x');
+                $sum += (float) trim ($width, 'pt');
+            } else {
                 return;
             }
-            $width = substr ($matches [0], strlen ('style:column-width='));
-            $width = trim ($width, '"');
-            $length = strlen ($width);
-            if ( $width [$length-1] == '%' ) {
-                return;
-            }
-            $width = $this->units->toPoints($width, 'x');
-            $sum += (float) trim ($width, 'pt');
         }
-        $this->autostyles[$this->temp_table_style] =
-            preg_replace ('/style:width="[^"]*"/', 'style:width="'.$sum.'pt"', $this->autostyles[$this->temp_table_style]);
+
+        $style_obj = $this->docHandler->getStyle($table_style);
+        if ($style_obj != NULL) {
+            $style_obj->setProperty('width', $sum.'pt');
+        }
     }
 
     function _odtTableClose () {
         // Eventually replace table width.
         $this->_replaceTableWidth ();
 
+        $table = $this->state->findClosestWithClass('table', 'table');
+        if ($table != NULL) {
+            $auto_columns = $table->getTableAutoColumns();
+            $column_defs = $table->getTableColumnDefs();
+        }
+
         // Writeback temporary table content if this is the first cell in the table body.
-        if ( !empty($this->temp_cols) ) {
+        if ( !empty($column_defs) ) {
             // First replace columns placeholder with created columns, if in auto mode.
-            if ( $this->temp_autocols === true ) {
+            if ( $auto_columns === true ) {
                 $this->doc =
-                    str_replace ('<ColumnsPlaceholder>', $this->temp_cols, $this->doc);
+                    str_replace ('<ColumnsPlaceholder>', $column_defs, $this->doc);
 
                 $this->doc =
-                    str_replace ('<MaxColsPlaceholder>', $this->temp_maxcols, $this->doc);
-
-                unset ($this->temp_content);
-                unset ($this->temp_cols);
-                $this->temp_autocols = false;
+                    str_replace ('<MaxColsPlaceholder>', $table->getTableMaxColumns(), $this->doc);
             }
         }
         $this->doc .= '</table:table>';
+        $this->state->leave();
     }
 
     /**
@@ -2971,18 +3133,32 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     function _odtTableAddColumnUseProperties (array $properties = NULL){
         // Overwrite/Create column style for actual column if $properties has any
         // meaningful params for a column-style (e.g. width).
-        $style_name = $this->temp_table_column_styles [$this->temp_column];
-        $style_name = $this->factory->createTableColumnStyle ($style, $properties, NULL, $style_name);
-        $this->temp_table_column_styles [$this->temp_column] = $style_name;
-        $this->autostyles[$style_name] = $style;
-        $this->temp_column++;
+        $table = $this->state->findClosestWithClass('table', 'table');
+        if ($table != NULL) {
+            $table_column_styles = $table->getTableColumnStyles();
+            $auto_columns = $table->getTableAutoColumns();
+            $max_columns = $table->getTableMaxColumns();
+            $curr_column = $table->getTableCurrentColumn();
+        }
+        $style_name = $table_column_styles [$curr_column];
+        $properties ['style-name'] = $style_name;
+        $style_obj = $this->factory->createTableColumnStyle ($properties);
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
+        
+        // FIXME: check this double style name assignment...
+        $table_column_styles [$curr_column] = $style_name;
+        $curr_column++;
+        $table->setTableCurrentColumn($curr_column);
 
         // Eventually add a new temp column if in auto mode
-        if ( $this->temp_autocols === true ) {
-            if ( $this->temp_column > $this->temp_maxcols ) {
+        if ( $auto_columns === true ) {
+            if ( $curr_column > $max_columns ) {
                 // Add temp column.
-                $this->temp_cols .= '<table:table-column table:style-name="'.$style_name.'"/>';
-                $this->temp_maxcols++;
+                $column_defs = $table->getTableColumnDefs();
+                $column_defs .= '<table:table-column table:style-name="'.$style_name.'"/>';
+                $table->setTableColumnDefs($column_defs);
+                $table->setTableMaxColumns($max_columns + 1);
             }
         }
     }
@@ -3020,8 +3196,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         $this->_processCSSClass ($properties, $import, $classes, $baseURL, $element);
         $this->_odtTableRowOpenUseProperties($properties);
 
-        // Reset temporary column counter
-        $this->temp_column = 0;
+        // A new row, we are back in the first column again.
+        $table = $this->state->findClosestWithClass('table', 'table');
+        if ($table != NULL) {
+            $table->setTableCurrentColumn(0);
+        }
     }
 
     /**
@@ -3047,11 +3226,13 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      */
     function _odtTableRowOpenUseProperties ($properties){
         // Create style.
-        $style_name = $this->factory->createTableRowStyle ($style, $properties);
-        $this->autostyles[$style_name] = $style;
+        $style_obj = $this->factory->createTableRowStyle ($properties);
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
 
         // Open table row.
         $this->doc .= '<table:table-row table:style-name="'.$style_name.'">';
+        $this->state->enter('table:table-row', 'table-row');
     }
 
     /**
@@ -3113,14 +3294,16 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     protected function _odtTableCellOpenUsePropertiesInternal ($properties, $inHeader = false, $colspan = 1, $rowspan = 1){
         $disabled = array ();
 
-        if ( $inHeader === false ) {
-            // Table header definition is finished.
-            $this->temp_in_header = false;
+        // Find our table state.
+        $table = $this->state->findClosestWithClass('table', 'table');
+        if ($table != NULL) {
+            $auto_columns = $table->getTableAutoColumns();
         }
 
         // Create style name. (Re-enable background-color!)
-        $style_name = $this->factory->createTableCellStyle ($style, $properties);
-        $this->autostyles[$style_name] = $style;
+        $style_obj = $this->factory->createTableCellStyle ($properties);
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
 
         // Create a paragraph style for the paragraph within the cell.
         // Disable properties that belong to the table cell style.
@@ -3139,13 +3322,22 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         if ( $colspan > 1 ) {
             $this->doc .= ' table:number-columns-spanned="'.$colspan.'"';
         }
-        if ( $inHeader === true && $this->temp_autocols === true && $colspan == 0 ) {
+        if ( $inHeader === true && $auto_columns === true && $colspan == 0 ) {
             $this->doc .= ' table:number-columns-spanned="<MaxColsPlaceholder>"';
         }
         if ( $rowspan > 1 ) {
             $this->doc .= ' table:number-rows-spanned="'.$rowspan.'"';
         }
         $this->doc .= '>';
+
+        if ( $inHeader === true ) {
+            $this->state->enter('table:table-cell', 'table-header');
+        } else {
+            $this->state->enter('table:table-cell', 'table-cell');
+        }
+        
+        // Opening a cell allows opening of a new paragraph!
+        $this->state->setInParagraph(false);
 
         // If a paragraph style was created, means text properties were set,
         // then we open a paragraph with our own style. Otherwise we use the standard style.
@@ -3154,20 +3346,6 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         } else {
             $this->p_open();
         }
-    }
-
-    /**
-     * Simple helper function for creating a style $name setting the specfied font size $size.
-     *
-     * @author LarsDW223
-     *
-     * @param string $name
-     * @param string $size
-     * @return string
-     */
-    protected function _odtBuildSizeStyle ($name, $size) {
-        $style = '<style:style style:name="'.$name.'" style:display-name="'.$name.'" style:family="text"><style:text-properties fo:font-size="'.$size.'" style:font-size-asian="'.$size.'" style:font-size-complex="'.$size.'"/></style:style>';
-        return $style;
     }
 
     /**
@@ -3201,15 +3379,17 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             // A font-size in percent is only supported in common style definitions, not in automatic
             // styles. Create a common style and set it as parent for this automatic style.
             $name = 'Size'.trim ($odt_fo_size, '%').'pc';
-            $this->styles [$name] = $this->_odtBuildSizeStyle ($name, $odt_fo_size);
-            $parent = $name;
+            $style_obj = $this->factory->createSizeOnlyTextStyle ($name, $odt_fo_size);
+            $this->docHandler->addStyle($style_obj);
+            $parent = $style_obj->getProperty('style-name');
         }
 
-        $style_name = $this->factory->createTextStyle($style, $properties, $disabled_props, $parent);
-        if ( $style_name == NULL ) {
-            return NULL;
+        if (!empty($parent)) {
+            $properties ['style-parent'] = $parent;
         }
-        $this->autostyles[$style_name] = $style;
+        $style_obj = $this->factory->createTextStyle($properties, $disabled_props);
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
 
         $disabled_props ['font-size'] = $save;
 
@@ -3242,8 +3422,9 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             // A font-size in percent is only supported in common style definitions, not in automatic
             // styles. Create a common style and set it as parent for this automatic style.
             $name = 'Size'.trim ($odt_fo_size, '%').'pc';
-            $this->styles [$name] = $this->_odtBuildSizeStyle ($name, $odt_fo_size);
-            $parent = $name;
+            $style_obj = $this->factory->createSizeOnlyTextStyle ($name, $odt_fo_size);
+            $this->docHandler->addStyle($style_obj);
+            $parent = $style_obj->getProperty('style-name');
         }
 
         $length = strlen ($properties ['text-indent']);
@@ -3255,11 +3436,12 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $properties ['text-indent'] = $this->_getAbsWidthMindMargins ($value).'cm';
         }
 
-        $style_name = $this->factory->createParagraphStyle($style, $properties, $disabled_props, $parent);
-        if ( $style_name == NULL ) {
-            return NULL;
+        if (!empty($parent)) {
+            $properties ['style-parent'] = $parent;
         }
-        $this->autostyles[$style_name] = $style;
+        $style_obj = $this->factory->createParagraphStyle($properties, $disabled_props);
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
 
         $disabled_props ['font-size'] = $save;
 
@@ -3338,14 +3520,18 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      */
     function _odtOpenMultiColumnFrame ($properties) {
         // Create style name.
-        $style_name = $this->factory->createMultiColumnFrameStyle ($style, $properties);
-        $this->autostyles[$style_name] = $style;
+        $style_obj = $this->factory->createMultiColumnFrameStyle ($properties);
+        $this->docHandler->addAutomaticStyle($style_obj);
+        $style_name = $style_obj->getProperty('style-name');
 
         $width_abs = $this->_getAbsWidthMindMargins (100);
 
         // Group the frame so that they are stacked one on each other.
         $this->p_close();
-        $this->doc .= '<text:p>';
+        $this->p_open();
+
+        $this->state->enter('frame', 'frame');
+        $this->state->setInParagraph(false);
 
         // Draw a frame with a text box in it. the text box will be left opened
         // to grow with the content (requires fo:min-height in $style_name).
@@ -3361,9 +3547,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      */
     function _odtCloseMultiColumnFrame () {
         $this->doc .= '</draw:text-box></draw:frame>';
-        $this->doc .= '</text:p>';
+        $this->p_close();
 
         $this->div_z_index -= 5;
+
+        $this->state->leave();
     }
 
     /**
@@ -3381,8 +3569,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param array $properties
      */
     function _odtOpenTextBoxUseProperties ($properties) {
-        $this->in_div_as_frame++;
-        if ( $this->in_div_as_frame > 1 ) {
+        if ($this->state->getInFrame()) {
             // Do not open a nested frame as this will make the content ofthe nested frame disappear.
             //return;
         }
@@ -3520,11 +3707,15 @@ class renderer_plugin_odt_page extends Doku_Renderer {
              <style:paragraph-properties
               fo:margin-left="'.$padding_left.'" fo:margin-right="10pt" fo:text-indent="0cm"/>
          </style:style>';
-        $this->autostyles[$style_name] = $style;
+
+        // Add style to our document
+        // (as unknown style because style-family graphic is not supported)
+        $style_obj = ODTUnknownStyle::importODTStyle($style);
+        $this->docHandler->addAutomaticStyle($style_obj);
 
         // Group the frame so that they are stacked one on each other.
         $this->p_close();
-        $this->doc .= '<text:p>';
+        $this->p_open();
         $this->linebreak();
         if ( $display == NULL ) {
             $this->doc .= '<draw:g>';
@@ -3534,7 +3725,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
         $anchor_type = 'paragraph';
         // FIXME: Later try to get nested frames working - probably with anchor = as-char
-        if ( $this->in_div_as_frame > 1 ) {
+        if ($this->state->getInFrame()) {
             $anchor_type = 'as-char';
         }
 
@@ -3566,7 +3757,9 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $this->doc .= 'draw:corner-radius="'.$radius.'" ';
 
         $this->doc .= '>';
-        //$this->p_open($style_name.'_text_box');
+        $this->state->enter('frame', 'frame');
+        $this->state->setInFrame(true);
+        $this->state->setInParagraph(false);
     }
 
     /**
@@ -3575,10 +3768,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @author LarsDW223
      */
     function _odtCloseTextBox () {
-        if ( $this->in_div_as_frame > 0 ) {
-            $this->in_div_as_frame--;
-        }
-        if ( $this->in_div_as_frame > 0 ) {
+        $this->state->leave();
+        if ($this->state->getInFrame()) {
             // Do not close the frame if this is a close for a nested frame.
             //return;
         }
@@ -3586,7 +3777,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         //$this->p_close();
         $this->doc .= '</draw:text-box></draw:frame>';
         $this->doc .= '</draw:g>';
-        $this->doc .= '</text:p>';
+        $this->p_close();
 
         $this->div_z_index -= 5;
     }
@@ -3611,9 +3802,12 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param $classString
      * @param $inlineStyle
      */
-    public function getODTProperties (&$dest, $element, $classString, $inlineStyle) {
+    public function getODTProperties (&$dest, $element, $classString, $inlineStyle, $media_sel=NULL) {
+        if ($media_sel === NULL) {
+            $media_sel = $this->config->getParam ('media_sel');
+        }
         // Get properties for our class/element from imported CSS
-        $this->import->getPropertiesForElement($dest, $element, $classString, $this->config->getParam ('media_sel'));
+        $this->import->getPropertiesForElement($dest, $element, $classString, $media_sel);
 
         // Interpret and add values from style to our properties
         $this->_processCSSStyle($dest, $inlineStyle);
@@ -3656,37 +3850,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @return string
      */
     public function adjustValueForODT ($property, $value, $emValue = 0) {
-        $values = preg_split ('/\s+/', $value);
-        $value = '';
-        foreach ($values as $part) {
-            $length = strlen ($part);
-
-            // If it is a short color value (#xxx) then convert it to long value (#xxxxxx)
-            // (ODT does not support the short form)
-            if ( $part [0] == '#' && $length == 4 ) {
-                $part = '#'.$part [1].$part [1].$part [2].$part [2].$part [3].$part [3];
-            } else {
-                // If it is a CSS color name, get it's real color value
-                /** @var helper_plugin_odt_csscolors $odt_colors */
-                $odt_colors = plugin_load('helper', 'odt_csscolors');
-                $color = $odt_colors->getColorValue ($part);
-                if ( $part == 'black' || $color != '#000000' ) {
-                    $part = $color;
-                }
-            }
-
-            if ( $length > 2 && $part [$length-2] == 'e' && $part [$length-1] == 'm' ) {
-                $number = substr ($part, 0, $length-2);
-                if ( is_numeric ($number) && !empty ($emValue) ) {
-                    $part = ($number * $emValue).'pt';
-                }
-            }
-
-            $value .= ' '.$part;
-        }
-        $value = trim($value);
-
-        return $value;
+        return $this->factory->adjustValueForODT ($property, $value, $emValue);
     }
 
     /**
