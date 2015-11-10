@@ -1,2 +1,6 @@
 Update upstream master 2015-11-09 00
   * Styles are added lists to ensure clear separation between lists.
+
+Issues:
+=======
+  * Image appear very small.
