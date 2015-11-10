@@ -1,6 +1,6 @@
 Update upstream master 2015-11-09 00
   * Styles are added lists to ensure clear separation between lists.
+  * Fix Images appear very small: https://github.com/LarsGit223/dokuwiki-plugin-odt/issues/118
 
 Issues:
 =======
-  * Image appear very small.
