@@ -74,6 +74,8 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     protected $css;
     /** @var  int counter for styles */
     protected $style_count;
+    /** @var  has any text content been added yet (excluding whitespace)? */
+    protected $text_empty = true;
 
     // Only for debugging
     //var $trace_dump;
@@ -195,7 +197,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
                 $template = $this->config->getParam ('odt_template');
                 $directory = $this->config->getParam ('tpl_dir');
                 $template_path = $this->config->getParam('mediadir').'/'.$directory."/".$template;
-                $this->docHandler->import($template_path, $media_sel);
+                $this->docHandler->import($template_path, $media_sel, $this->config->getParam('mediadir'));
                 break;
 
             default:
@@ -258,6 +260,9 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * Closes the document
      */
     function document_end(){
+        // Close any open paragraph if not done yet.
+        $this->p_close ();
+        
         // DEBUG: The following puts out the loaded raw CSS code
         //$this->p_open();
         // This line outputs the raw CSS code
@@ -329,13 +334,27 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             return;
         }
 
-        // Set marker and save data for pending change format.
-        // The format change istelf will be done on the next call to p_open or header()
-        // to prevent empty lines after the format change.
-        $this->changePageFormat = $data;
+        if ($this->text_empty) {
+            // If the text is still empty, then we change the start page format now.
+            $this->page->setFormat($data ['format'], $data ['orientation'], $data['margin-top'], $data['margin-right'], $data['margin-bottom'], $data['margin-left']);
+            $first_page = $this->docHandler->getStyle($this->docHandler->getStyleName('first page'));
+            if ($first_page != NULL) {
+                $first_page->setProperty('width', $this->page->getWidth().'cm');
+                $first_page->setProperty('height', $this->page->getHeight().'cm');
+                $first_page->setProperty('margin-top', $this->page->getMarginTop().'cm');
+                $first_page->setProperty('margin-right', $this->page->getMarginRight().'cm');
+                $first_page->setProperty('margin-bottom', $this->page->getMarginBottom().'cm');
+                $first_page->setProperty('margin-left', $this->page->getMarginLeft().'cm');
+            }
+        } else {
+            // Set marker and save data for pending change format.
+            // The format change istelf will be done on the next call to p_open or header()
+            // to prevent empty lines after the format change.
+            $this->changePageFormat = $data;
 
-        // Close paragraph if open
-        $this->p_close();
+            // Close paragraph if open
+            $this->p_close();
+        }
     }
 
     /**
@@ -866,6 +885,69 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             }
         }
         $this->doc .= $this->_xmlEntities($text);
+        if ($this->text_empty && !ctype_space($text)) {
+            $this->text_empty = false;
+        }
+    }
+
+    /**
+     * The function replaces the last paragraph of a list
+     * with a style having the properties of 'List_Last_Paragraph'.
+     *
+     * The function does NOT change the last paragraph of nested lists.
+     */
+    protected function replaceLastListParagraph() {
+        if ($this->state->getInList()) {
+            // We are in a list item.
+            $list = $this->state->findClosestWithClass('list');
+            if ($list == NULL) {
+                return;
+            }
+
+            $list_count = $this->state->countClass('list');
+            $position = $list->getListLastParagraphPosition();
+
+            if ($list_count != 1 || $position == -1) {
+                // Do nothing if this is a nested list or the position was not saved
+                return;
+            }
+
+            $last_p_style = NULL;
+            if (preg_match('/<text:p text:style-name="[^"]*">/', $this->doc, $matches, 0, $position) === 1) {
+                $last_p_style = substr($matches [0], strlen('<text:p text:style-name='));
+                $last_p_style = trim($last_p_style, '">');
+            } else {
+                // Nothing found???
+                return;
+            }
+
+            // Create a style for putting a bottom margin for this last paragraph of the list
+            // (if not done yet, the name must be unique!)
+            $style_name = 'LastListParagraph_'.$last_p_style;
+            $style_last = $this->docHandler->getStyle($this->docHandler->getStyleName('list last paragraph'));
+            if (!$this->docHandler->styleExists($style_name)) {
+                if ($style_last != NULL) {
+                    $style_body = $this->docHandler->getStyle($last_p_style);
+                    $style_display_name = 'Last '.$style_body->getProperty('style-display-name');
+                    $style_obj = clone $style_last;
+                    if ($style_obj != NULL) {
+                        $style_obj->setProperty('style-name', $style_name);
+                        $style_obj->setProperty('style-parent', $last_p_style);
+                        $style_obj->setProperty('style-display-name', $style_display_name);
+                        $top = $style_last->getProperty('margin-top');
+                        if ($top === NULL) {
+                            $style_obj->setProperty('margin-top', $style_body->getProperty('margin-top'));
+                        }
+                        $this->docHandler->addStyle($style_obj);
+                    }
+                }
+            }
+            
+            // Finally replace style name of last paragraph.
+            $this->doc = substr_replace ($this->doc, 
+                '<text:p text:style-name="'.$style_name.'">',
+                $position, strlen($matches[0]));
+        }
     }
 
     /**
@@ -878,6 +960,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             $style = $this->docHandler->getStyleName('body');
         }
 
+        $list = NULL;
         if ($this->state->getInListItem()) {
             // We are in a list item. Is this the list start?
             $list = $this->state->findClosestWithClass('list');
@@ -932,6 +1015,12 @@ class renderer_plugin_odt_page extends Doku_Renderer {
                 $style = $this->createPagebreakStyle ($style);
                 $this->pagebreak = false;
             }
+            
+            // If we are in a list remember paragraph position
+            if ($list != NULL) {
+                $list->setListLastParagraphPosition(strlen($this->doc));
+            }
+            
             $this->doc .= '<text:p text:style-name="'.$style.'">';
         }
 
@@ -1132,6 +1221,9 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @param int $numrows NOT IMPLEMENTED
      */
     function table_open($maxcols = NULL, $numrows = NULL){
+        // Close any open paragraph.
+        $this->p_close();
+        
         // Do additional actions if the parent element is a list.
         // In this case we need to finish the list and re-open it later
         // after the table has been closed! --> tables may not be part of a list item in ODT!
@@ -1412,8 +1504,23 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             // Do not do anything as long as list is interrupted
             return;
         }
+
+        // Eventually modify last list paragraph first
+        $this->replaceLastListParagraph();
+
         $this->doc .= '</text:list>';
+
+        $position = $this->state->getListLastParagraphPosition();
         $this->state->leave();
+        
+        // If we are still in a list save the last paragraph position
+        // in the current list (needed for nested lists!).
+        if ($this->state->getInList()) {
+            $list = $this->state->findClosestWithClass('list');
+            if ($list != NULL) {
+                $list->setListLastParagraphPosition($position);
+            }
+        }
     }
 
     function listu_open($continue=false) {
@@ -1760,6 +1867,9 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         // cleanup leftover span tags
         $highlighted_code = preg_replace('/<span[^>]*>/', "<text:span>", $highlighted_code);
         $highlighted_code = str_replace("&nbsp;", "&#xA0;", $highlighted_code);
+        // Replace links with ODT link syntax
+        $highlighted_code = preg_replace_callback('/<a (href="[^"]*">.*)<\/a>/', array($this, '_convert_geshi_links'), $highlighted_code);
+
         $this->_preformatted($highlighted_code, $style_name, false);
     }
 
@@ -1784,6 +1894,26 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         
         // Now make use of the new style
         return '<text:span text:style-name="'.$style_name.'">';
+    }
+
+    /**
+     * Callback function which creates a link from the part 'href="[^"]*">.*'
+     * in the pattern /<a (href="[^"]*">.*)<\/a>/. See function _highlight().
+     * 
+     * @param array $matches
+     * @return string
+     */
+    function _convert_geshi_links($matches) {
+        $content_start = strpos ($matches[1], '>');
+        $content = substr ($matches[1], $content_start+1);
+        preg_match ('/href="[^"]*"/', $matches[1], $urls);
+        $url = substr ($urls[0], 5);
+        $url = trim($url, '"');
+        // Keep '&' and ':' in the link unescaped, otherwise url parameter passing will not work
+        $url = str_replace('&amp;', '&', $url);
+        $url = str_replace('%3A', ':', $url);
+
+        return $this->_doLink($url, $content);
     }
 
     /**
@@ -2329,7 +2459,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
         // make sure width and height are available
         if (!$width || !$height) {
-            list($width, $height) = $this->_odtGetImageSize($string, $width, $height);
+            list($width, $height) = $this->_odtGetImageSizeString($string, $width, $height);
         }
 
         if($align){
@@ -2340,6 +2470,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
         if (!$style or !$this->docHandler->styleExists($style)) {
             $style = $this->docHandler->getStyleName('media '.$align);
+        }
+
+        // Open paragraph if necessary
+        if (!$this->state->getInParagraph()) {
+            $this->p_open();
         }
 
         // Enter Frame state and allow new paragraph.
@@ -2381,13 +2516,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
      * @return string
      */
     function _odtAddImageAsFileOnly($src){
-        $name = '';
-        if (file_exists($src)) {
-            list($ext,$mime) = mimetype($src);
-            $name = 'Pictures/'.md5($src).'.'.$ext;
-            $this->docHandler->addFile($name, $mime, io_readfile($src,false));
-        }
-        return $name;
+        return $this->docHandler->addFileAsPicture($src);
     }
 
     /**
@@ -2410,7 +2539,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
         }
         // make sure width and height are available
         if (!$width || !$height) {
-            list($width, $height) = $this->_odtGetImageSize($src, $width, $height);
+            list($width, $height) = $this->_odtGetImageSizeString($src, $width, $height);
         } else {
             // Adjust values for ODT
             $width = $this->adjustXLengthValueForODT ($width);
@@ -2425,6 +2554,11 @@ class renderer_plugin_odt_page extends Doku_Renderer {
 
         if (!$style or !$this->docHandler->styleExists($style)) {
             $style = $this->docHandler->getStyleName('media '.$align);
+        }
+
+        // Open paragraph if necessary
+        if (!$this->state->getInParagraph()) {
+            $this->p_open();
         }
 
         if ($title) {
@@ -2451,12 +2585,15 @@ class renderer_plugin_odt_page extends Doku_Renderer {
     }
 
     /**
-     * @param string $src
-     * @param  $width
-     * @param  $height
-     * @return array
+     * The function tries to examine the width and height
+     * of the image stored in file $src.
+     * 
+     * @param  string $src The file name of image
+     * @return array  Width and height of the image in centimeters or
+     *                both 0 if file doesn't exist.
+     *                Just the integer value, no units included.
      */
-    function _odtGetImageSize($src, $width = NULL, $height = NULL){
+    public static function _odtGetImageSize($src){
         if (file_exists($src)) {
             $info  = getimagesize($src);
             if(!$width){
@@ -2465,11 +2602,33 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             }else{
                 $height = round(($width * $info[1]) / $info[0]);
             }
+
+            // Convert from pixel to centimeters
+            if ($width) $width = (($width/96.0)*2.54);
+            if ($height) $height = (($height/96.0)*2.54);
+
+            return array($width, $height);
         }
 
-        // convert from pixel to centimeters
-        if ($width) $width = (($width/96.0)*2.54);
-        if ($height) $height = (($height/96.0)*2.54);
+        return array(0, 0);
+    }
+
+    /**
+     * @param string $src
+     * @param  $width
+     * @param  $height
+     * @return array
+     */
+    function _odtGetImageSizeString($src, $width = NULL, $height = NULL){
+        list($width_file, $height_file) = $this->_odtGetImageSize($src);
+        if ($width_file != 0) {
+            $width  = $width_file;
+            $height = $height_file;
+        } else {
+            // convert from pixel to centimeters
+            if ($width) $width = (($width/96.0)*2.54);
+            if ($height) $height = (($height/96.0)*2.54);
+        }
 
         if ($width && $height) {
             // Don't be wider than the page
@@ -2768,7 +2927,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
                 $picture = $import->replaceURLPrefix ($picture, $baseURL);
             }
             $pic_link=$this->_odtAddImageAsFileOnly($picture);
-            list($pic_width, $pic_height) = $this->_odtGetImageSize($picture);
+            list($pic_width, $pic_height) = $this->_odtGetImageSizeString($picture);
         }
 
         $horiz_pos = 'center';
@@ -3606,7 +3765,7 @@ class renderer_plugin_odt_page extends Doku_Renderer {
             // If a picture/background-image is set in the CSS, than we insert it manually here.
             // This is a workaround because ODT does not support the background-image attribute in a span.
             $pic_link=$this->_odtAddImageAsFileOnly($picture);
-            list($pic_width, $pic_height) = $this->_odtGetImageSize($picture);
+            list($pic_width, $pic_height) = $this->_odtGetImageSizeString($picture);
         }
 
         if ( empty($horiz_pos) ) {
